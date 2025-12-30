@@ -4,8 +4,8 @@ import requests
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ["8502495764:AAGb87crRWTPoqgQU6xy_oe4Y0O9VQNB-TU"]
-CHAT_ID   = os.environ["7521725282"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHAT_ID   = os.environ["CHAT_ID"]
 SECRET    = os.environ.get("SECRET", "1234")  # webhook koruması
 
 PING_TIMEOUT_S = 260        # 260 sn ping yoksa uyar
