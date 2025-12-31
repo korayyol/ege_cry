@@ -8,6 +8,17 @@ app = Flask(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHAT_ID   = os.environ.get("CHAT_ID", "")
 
+# ===== DEVICE NAME DEFAULT =====
+DEFAULT_DEV = "EGE"
+
+# ===== LIMITS (senin istediğin) =====
+LIMITS = {
+    "thr":       (1, 1023),     # ADC RMS değeri
+    "hold_ms":   (1, 10000),    # ms
+    "cooldown_s":(1, 600),      # s
+    "window_ms": (18, 7200),    # ms (WINDOW_MS)
+}
+
 # ===== DEFAULT DEVICE STATE =====
 DEFAULTS = dict(
     armed=True,
@@ -15,14 +26,14 @@ DEFAULTS = dict(
     hold_ms=900,
     cooldown_s=30,
 
-    # NEW: RMS pencere süresi (ESP tarafındaki WINDOW_MS)
+    # RMS pencere süresi (ESP tarafındaki WINDOW_MS)
     window_ms=900,
 
     # watchdog / state
     last_ping=0,
     last_alarm=0,
 
-    # NEW: calib state
+    # calib state
     calib_req_ts=0,        # telegram /calib ile setlenir
     calib_result=None,     # float/int
     calib_result_ts=0      # result geldiği zaman
@@ -49,6 +60,9 @@ def ensure_dev(dev):
     if dev not in DEVICES:
         DEVICES[dev] = DEFAULTS.copy()
 
+def clamp(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, v))
+
 # ---------- watchdog ----------
 def watchdog():
     while True:
@@ -69,7 +83,7 @@ def home():
 
 @app.get("/cfg")
 def cfg():
-    dev = request.args.get("dev", "baby1")
+    dev = request.args.get("dev", DEFAULT_DEV)
     ensure_dev(dev)
     s = DEVICES[dev]
     return jsonify(
@@ -77,17 +91,14 @@ def cfg():
         thr=s["thr"],
         hold_ms=s["hold_ms"],
         cooldown_s=s["cooldown_s"],
-
-        # NEW
         window_ms=s["window_ms"],
         calib_req_ts=s["calib_req_ts"],
-
         server_time=int(time.time())
     )
 
 @app.get("/ping")
 def ping():
-    dev = request.args.get("dev", "baby1")
+    dev = request.args.get("dev", DEFAULT_DEV)
     ensure_dev(dev)
     DEVICES[dev]["last_ping"] = time.time()
     return jsonify(ok=True, t=int(time.time()))
@@ -95,7 +106,7 @@ def ping():
 @app.post("/event")
 def event():
     data = request.get_json(force=True) or {}
-    dev = data.get("dev", "baby1")
+    dev = data.get("dev", DEFAULT_DEV)
     rms = data.get("rms", None)
 
     ensure_dev(dev)
@@ -104,12 +115,11 @@ def event():
     tg_send(f"🚨 {dev}: Ağlama algılandı (RMS={rms})")
     return jsonify(ok=True)
 
-# NEW: ESP 15 saniyelik oda ölçüm sonucunu buraya yollar
 @app.post("/calib")
 def calib_result():
     data = request.get_json(force=True) or {}
-    dev = data.get("dev", "baby1")
-    rms_avg = data.get("rms_avg", None)   # float/int bekliyoruz
+    dev = data.get("dev", DEFAULT_DEV)
+    rms_avg = data.get("rms_avg", None)
     dur_s = data.get("dur_s", 15)
 
     ensure_dev(dev)
@@ -117,9 +127,7 @@ def calib_result():
     s["calib_result"] = rms_avg
     s["calib_result_ts"] = int(time.time())
 
-    # İstersen otomatik telegrama da bas:
     tg_send(f"📏 {dev}: Oda ölçümü hazır ({dur_s}s) | RMS_avg={rms_avg}")
-
     return jsonify(ok=True)
 
 @app.post("/telegram")
@@ -128,7 +136,7 @@ def telegram():
     msg = (data.get("message", {}) or {}).get("text", "")
     msg = (msg or "").strip()
 
-    dev = "baby1"
+    dev = DEFAULT_DEV
     ensure_dev(dev)
     s = DEVICES[dev]
 
@@ -161,6 +169,7 @@ def telegram():
         last_ping_ago = int(time.time() - s["last_ping"]) if s["last_ping"] else -1
         calib_age = int(time.time() - s["calib_result_ts"]) if s["calib_result_ts"] else -1
         reply(
+            f"dev={dev}\n"
             f"armed={s['armed']}\n"
             f"thr={s['thr']}\n"
             f"hold_ms={s['hold_ms']}\n"
@@ -171,14 +180,12 @@ def telegram():
         )
         return jsonify(ok=True)
 
-    # NEW: /calib komutu
+    # /calib komutu
     if msg == "/calib" or msg.lower() == "calib":
-        # Eğer taze sonuç varsa direkt dön
         if s["calib_result_ts"] and (time.time() - s["calib_result_ts"] <= 60) and (s["calib_result"] is not None):
             reply(f"✅ Oda RMS (15s ort): {s['calib_result']}  (taze)")
             return jsonify(ok=True)
 
-        # Yoksa yeni ölçüm iste
         s["calib_req_ts"] = int(time.time())
         s["calib_result"] = None
         s["calib_result_ts"] = 0
@@ -194,14 +201,21 @@ def telegram():
             return jsonify(ok=True)
 
         if key == "thr":
-            s["thr"] = max(1, min(1023, val))
+            lo, hi = LIMITS["thr"]
+            s["thr"] = clamp(val, lo, hi)
+
         elif key == "hold":
-            s["hold_ms"] = max(100, min(5000, val))
+            lo, hi = LIMITS["hold_ms"]
+            s["hold_ms"] = clamp(val, lo, hi)
+
         elif key == "cooldown":
-            s["cooldown_s"] = max(5, min(600, val))
+            lo, hi = LIMITS["cooldown_s"]
+            s["cooldown_s"] = clamp(val, lo, hi)
+
         elif key in ["window", "window_ms"]:
-            # WINDOW_MS için makul sınır (istersen artırırız)
-            s["window_ms"] = max(200, min(5000, val))
+            lo, hi = LIMITS["window_ms"]
+            s["window_ms"] = clamp(val, lo, hi)
+
         else:
             reply("❌ Bilinmeyen parametre")
             return jsonify(ok=True)
