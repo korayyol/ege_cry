@@ -5,8 +5,10 @@ import requests
 app = Flask(__name__)
 
 # ===== ENV =====
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-CHAT_ID   = os.environ.get("CHAT_ID", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")   # sadece bu yeterli
+
+# ===== Subscribers (botu kullanan herkes) =====
+SUBSCRIBERS = set()  # chat_id (int)
 
 # ===== DEFAULT DEVICE STATE =====
 DEFAULTS = dict(
@@ -15,17 +17,14 @@ DEFAULTS = dict(
     hold_ms=900,
     cooldown_s=30,
 
-    # NEW: RMS pencere süresi (ESP tarafındaki WINDOW_MS)
     window_ms=900,
 
-    # watchdog / state
     last_ping=0,
     last_alarm=0,
 
-    # NEW: calib state
-    calib_req_ts=0,        # telegram /calib ile setlenir
-    calib_result=None,     # float/int
-    calib_result_ts=0      # result geldiği zaman
+    calib_req_ts=0,
+    calib_result=None,
+    calib_result_ts=0
 )
 
 DEVICES = {}
@@ -33,17 +32,22 @@ DEVICES = {}
 PING_TIMEOUT_S = 260
 CHECK_PERIOD_S = 10
 
-# ---------- helpers ----------
-def tg_send(msg: str):
-    if not BOT_TOKEN or not CHAT_ID:
-        print("Telegram env missing")
+# ---------- Telegram helpers ----------
+def tg_send(chat_id: int, msg: str):
+    if not BOT_TOKEN:
+        print("Telegram env missing: BOT_TOKEN")
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
-        r = requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=8)
+        r = requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=8)
         print("sendMessage:", r.status_code, r.text[:200])
     except Exception as e:
         print("Telegram send error:", e)
+
+def tg_broadcast(msg: str):
+    # tüm abonelere gönder
+    for cid in list(SUBSCRIBERS):
+        tg_send(cid, msg)
 
 def ensure_dev(dev):
     if dev not in DEVICES:
@@ -56,7 +60,7 @@ def watchdog():
         for dev, s in DEVICES.items():
             if s["last_ping"] > 0 and now - s["last_ping"] > PING_TIMEOUT_S:
                 if now - s["last_alarm"] > PING_TIMEOUT_S:
-                    tg_send(f"⚠️ {dev}: {PING_TIMEOUT_S}s ping yok (ESP offline?)")
+                    tg_broadcast(f"⚠️ {dev}: {PING_TIMEOUT_S}s ping yok (ESP offline?)")
                     s["last_alarm"] = now
         time.sleep(CHECK_PERIOD_S)
 
@@ -69,7 +73,7 @@ def home():
 
 @app.get("/cfg")
 def cfg():
-    dev = request.args.get("dev", "EGE")  # default device changed
+    dev = request.args.get("dev", "EGE")
     ensure_dev(dev)
     s = DEVICES[dev]
     return jsonify(
@@ -77,17 +81,14 @@ def cfg():
         thr=s["thr"],
         hold_ms=s["hold_ms"],
         cooldown_s=s["cooldown_s"],
-
-        # NEW
         window_ms=s["window_ms"],
         calib_req_ts=s["calib_req_ts"],
-
         server_time=int(time.time())
     )
 
 @app.get("/ping")
 def ping():
-    dev = request.args.get("dev", "EGE")  # default device changed
+    dev = request.args.get("dev", "EGE")
     ensure_dev(dev)
     DEVICES[dev]["last_ping"] = time.time()
     return jsonify(ok=True, t=int(time.time()))
@@ -95,21 +96,20 @@ def ping():
 @app.post("/event")
 def event():
     data = request.get_json(force=True) or {}
-    dev = data.get("dev", "EGE")  # default device changed
+    dev = data.get("dev", "EGE")
     rms = data.get("rms", None)
 
     ensure_dev(dev)
     DEVICES[dev]["last_alarm"] = time.time()
 
-    tg_send(f"🚨 {dev}: Ağlama algılandı (RMS={rms})")
+    tg_broadcast(f"🚨 {dev}: Ağlama algılandı (RMS={rms})")
     return jsonify(ok=True)
 
-# NEW: ESP 15 saniyelik oda ölçüm sonucunu buraya yollar
 @app.post("/calib")
 def calib_result():
     data = request.get_json(force=True) or {}
-    dev = data.get("dev", "EGE")  # default device changed
-    rms_avg = data.get("rms_avg", None)   # float/int bekliyoruz
+    dev = data.get("dev", "EGE")
+    rms_avg = data.get("rms_avg", None)
     dur_s = data.get("dur_s", 15)
 
     ensure_dev(dev)
@@ -117,24 +117,33 @@ def calib_result():
     s["calib_result"] = rms_avg
     s["calib_result_ts"] = int(time.time())
 
-    # İstersen otomatik telegrama da bas:
-    tg_send(f"📏 {dev}: Oda ölçümü hazır ({dur_s}s) | RMS_avg={rms_avg}")
-
+    tg_broadcast(f"📏 {dev}: Oda ölçümü hazır ({dur_s}s) | RMS_avg={rms_avg}")
     return jsonify(ok=True)
 
 @app.post("/telegram")
 def telegram():
-    data = request.get_json(silent=True) or {}
-    msg = (data.get("message", {}) or {}).get("text", "")
-    msg = (msg or "").strip()
+    update = request.get_json(silent=True) or {}
 
-    dev = "EGE"  # default device changed
+    # Telegram Update içinden chat id + mesajı çek
+    msg_obj = update.get("message") or update.get("edited_message") or {}
+    chat = msg_obj.get("chat") or {}
+    chat_id = chat.get("id")  # int
+    text = (msg_obj.get("text") or "").strip()
+
+    # Chat id yoksa çık
+    if chat_id is None:
+        return jsonify(ok=True)
+
+    # bu chat'i abone yap (private veya grup fark etmez)
+    SUBSCRIBERS.add(int(chat_id))
+
+    dev = "EGE"
     ensure_dev(dev)
     s = DEVICES[dev]
 
-    def reply(t): tg_send(t)
+    def reply(t): tg_send(int(chat_id), t)
 
-    if msg in ["/start", "/help"]:
+    if text in ["/start", "/help"]:
         reply(
             "/on → sistemi aç\n"
             "/off → sistemi kapat\n"
@@ -147,17 +156,17 @@ def telegram():
         )
         return jsonify(ok=True)
 
-    if msg == "/on":
+    if text == "/on":
         s["armed"] = True
         reply("🟢 Sistem AKTİF")
         return jsonify(ok=True)
 
-    if msg == "/off":
+    if text == "/off":
         s["armed"] = False
         reply("🔴 Sistem KAPALI")
         return jsonify(ok=True)
 
-    if msg == "/status":
+    if text == "/status":
         last_ping_ago = int(time.time() - s["last_ping"]) if s["last_ping"] else -1
         calib_age = int(time.time() - s["calib_result_ts"]) if s["calib_result_ts"] else -1
         reply(
@@ -171,29 +180,26 @@ def telegram():
         )
         return jsonify(ok=True)
 
-    # NEW: /calib komutu
-    if msg == "/calib" or msg.lower() == "calib":
-        # Eğer taze sonuç varsa direkt dön
+    if text == "/calib" or text.lower() == "calib":
         if s["calib_result_ts"] and (time.time() - s["calib_result_ts"] <= 60) and (s["calib_result"] is not None):
             reply(f"✅ Oda RMS (15s ort): {s['calib_result']}  (taze)")
             return jsonify(ok=True)
 
-        # Yoksa yeni ölçüm iste
         s["calib_req_ts"] = int(time.time())
         s["calib_result"] = None
         s["calib_result_ts"] = 0
         reply("📏 15sn oda ölçümü başlatıldı. ~15-20sn sonra tekrar /calib yaz.")
         return jsonify(ok=True)
 
-    if msg.startswith("/set"):
+    if text.startswith("/set"):
         try:
-            _, key, val = msg.split()
+            _, key, val = text.split()
             val = int(val)
         except:
             reply("❌ Format: /set thr|hold|cooldown|window değer")
             return jsonify(ok=True)
 
-        # min-max updated to your requested limits
+        # senin istediğin min-max limitler
         if key == "thr":
             s["thr"] = max(1, min(1023, val))
         elif key == "hold":
