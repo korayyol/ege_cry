@@ -69,7 +69,7 @@ def home():
 
 @app.get("/cfg")
 def cfg():
-    dev = request.args.get("dev", "baby1")
+    dev = request.args.get("dev", "EGE")  # default device changed
     ensure_dev(dev)
     s = DEVICES[dev]
     return jsonify(
@@ -87,7 +87,7 @@ def cfg():
 
 @app.get("/ping")
 def ping():
-    dev = request.args.get("dev", "baby1")
+    dev = request.args.get("dev", "EGE")  # default device changed
     ensure_dev(dev)
     DEVICES[dev]["last_ping"] = time.time()
     return jsonify(ok=True, t=int(time.time()))
@@ -95,7 +95,7 @@ def ping():
 @app.post("/event")
 def event():
     data = request.get_json(force=True) or {}
-    dev = data.get("dev", "baby1")
+    dev = data.get("dev", "EGE")  # default device changed
     rms = data.get("rms", None)
 
     ensure_dev(dev)
@@ -108,7 +108,7 @@ def event():
 @app.post("/calib")
 def calib_result():
     data = request.get_json(force=True) or {}
-    dev = data.get("dev", "baby1")
+    dev = data.get("dev", "EGE")  # default device changed
     rms_avg = data.get("rms_avg", None)   # float/int bekliyoruz
     dur_s = data.get("dur_s", 15)
 
@@ -128,7 +128,7 @@ def telegram():
     msg = (data.get("message", {}) or {}).get("text", "")
     msg = (msg or "").strip()
 
-    dev = "baby1"
+    dev = "EGE"  # default device changed
     ensure_dev(dev)
     s = DEVICES[dev]
 
@@ -193,15 +193,15 @@ def telegram():
             reply("❌ Format: /set thr|hold|cooldown|window değer")
             return jsonify(ok=True)
 
+        # min-max updated to your requested limits
         if key == "thr":
             s["thr"] = max(1, min(1023, val))
         elif key == "hold":
-            s["hold_ms"] = max(100, min(5000, val))
+            s["hold_ms"] = max(1, min(10000, val))
         elif key == "cooldown":
-            s["cooldown_s"] = max(5, min(600, val))
+            s["cooldown_s"] = max(1, min(600, val))
         elif key in ["window", "window_ms"]:
-            # WINDOW_MS için makul sınır (istersen artırırız)
-            s["window_ms"] = max(200, min(5000, val))
+            s["window_ms"] = max(18, min(7200, val))
         else:
             reply("❌ Bilinmeyen parametre")
             return jsonify(ok=True)
