@@ -1,4 +1,31 @@
+# app.py
+import os
+import time
+import threading
+from flask import Flask, request, jsonify
+import requests
 
+app = Flask(__name__)
+
+# ===== ENV =====
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+SECRET    = os.environ.get("SECRET", "")  # opsiyonel: webhook güvenliği için
+
+# ===== Subscribers (bildirim alacak chat'ler) =====
+SUBSCRIBERS = set()  # chat_id (int)
+
+# ===== DEFAULT DEVICE STATE =====
+DEFAULTS = dict(
+    armed=True,
+    thr=35,
+    hold_ms=900,
+    cooldown_s=30,
+    window_ms=360,         # ms
+
+    last_ping=0.0,
+    last_alarm=0.0,
+
+    calib_req_ts=0,
     calib_result=None,
     calib_result_ts=0
 )
