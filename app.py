@@ -7,7 +7,6 @@ app = Flask(__name__)
 # ===== ENV =====
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHAT_ID   = os.environ.get("CHAT_ID", "")
-# SECRET kaldırıldı (403 sorununu bitirmek için)
 
 # ===== DEFAULT DEVICE STATE =====
 DEFAULTS = dict(
@@ -15,8 +14,18 @@ DEFAULTS = dict(
     thr=35,
     hold_ms=900,
     cooldown_s=30,
+
+    # NEW: RMS pencere süresi (ESP tarafındaki WINDOW_MS)
+    window_ms=900,
+
+    # watchdog / state
     last_ping=0,
-    last_alarm=0
+    last_alarm=0,
+
+    # NEW: calib state
+    calib_req_ts=0,        # telegram /calib ile setlenir
+    calib_result=None,     # float/int
+    calib_result_ts=0      # result geldiği zaman
 )
 
 DEVICES = {}
@@ -68,6 +77,11 @@ def cfg():
         thr=s["thr"],
         hold_ms=s["hold_ms"],
         cooldown_s=s["cooldown_s"],
+
+        # NEW
+        window_ms=s["window_ms"],
+        calib_req_ts=s["calib_req_ts"],
+
         server_time=int(time.time())
     )
 
@@ -90,10 +104,26 @@ def event():
     tg_send(f"🚨 {dev}: Ağlama algılandı (RMS={rms})")
     return jsonify(ok=True)
 
+# NEW: ESP 15 saniyelik oda ölçüm sonucunu buraya yollar
+@app.post("/calib")
+def calib_result():
+    data = request.get_json(force=True) or {}
+    dev = data.get("dev", "baby1")
+    rms_avg = data.get("rms_avg", None)   # float/int bekliyoruz
+    dur_s = data.get("dur_s", 15)
+
+    ensure_dev(dev)
+    s = DEVICES[dev]
+    s["calib_result"] = rms_avg
+    s["calib_result_ts"] = int(time.time())
+
+    # İstersen otomatik telegrama da bas:
+    tg_send(f"📏 {dev}: Oda ölçümü hazır ({dur_s}s) | RMS_avg={rms_avg}")
+
+    return jsonify(ok=True)
+
 @app.post("/telegram")
 def telegram():
-    # SECRET kontrolü kaldırıldı -> 403 artık yok
-
     data = request.get_json(silent=True) or {}
     msg = (data.get("message", {}) or {}).get("text", "")
     msg = (msg or "").strip()
@@ -108,9 +138,11 @@ def telegram():
         reply(
             "/on → sistemi aç\n"
             "/off → sistemi kapat\n"
+            "/calib → 15sn oda RMS ölçümü (sonuç için tekrar /calib)\n"
             "/set thr 35\n"
             "/set hold 900\n"
             "/set cooldown 30\n"
+            "/set window 900   (WINDOW_MS)\n"
             "/status"
         )
         return jsonify(ok=True)
@@ -126,13 +158,31 @@ def telegram():
         return jsonify(ok=True)
 
     if msg == "/status":
+        last_ping_ago = int(time.time() - s["last_ping"]) if s["last_ping"] else -1
+        calib_age = int(time.time() - s["calib_result_ts"]) if s["calib_result_ts"] else -1
         reply(
             f"armed={s['armed']}\n"
             f"thr={s['thr']}\n"
             f"hold_ms={s['hold_ms']}\n"
             f"cooldown_s={s['cooldown_s']}\n"
-            f"last_ping={int(time.time()-s['last_ping'])}s önce"
+            f"window_ms={s['window_ms']}\n"
+            f"last_ping={last_ping_ago}s önce\n"
+            f"last_calib_rms={s['calib_result']} ({calib_age}s önce)"
         )
+        return jsonify(ok=True)
+
+    # NEW: /calib komutu
+    if msg == "/calib" or msg.lower() == "calib":
+        # Eğer taze sonuç varsa direkt dön
+        if s["calib_result_ts"] and (time.time() - s["calib_result_ts"] <= 60) and (s["calib_result"] is not None):
+            reply(f"✅ Oda RMS (15s ort): {s['calib_result']}  (taze)")
+            return jsonify(ok=True)
+
+        # Yoksa yeni ölçüm iste
+        s["calib_req_ts"] = int(time.time())
+        s["calib_result"] = None
+        s["calib_result_ts"] = 0
+        reply("📏 15sn oda ölçümü başlatıldı. ~15-20sn sonra tekrar /calib yaz.")
         return jsonify(ok=True)
 
     if msg.startswith("/set"):
@@ -140,7 +190,7 @@ def telegram():
             _, key, val = msg.split()
             val = int(val)
         except:
-            reply("❌ Format: /set thr|hold|cooldown değer")
+            reply("❌ Format: /set thr|hold|cooldown|window değer")
             return jsonify(ok=True)
 
         if key == "thr":
@@ -149,6 +199,9 @@ def telegram():
             s["hold_ms"] = max(100, min(5000, val))
         elif key == "cooldown":
             s["cooldown_s"] = max(5, min(600, val))
+        elif key in ["window", "window_ms"]:
+            # WINDOW_MS için makul sınır (istersen artırırız)
+            s["window_ms"] = max(200, min(5000, val))
         else:
             reply("❌ Bilinmeyen parametre")
             return jsonify(ok=True)
