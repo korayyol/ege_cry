@@ -7,7 +7,7 @@ app = Flask(__name__)
 # ===== ENV =====
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHAT_ID   = os.environ.get("CHAT_ID", "")
-SECRET    = os.environ.get("SECRET", "")   # opsiyonel webhook güvenliği
+# SECRET kaldırıldı (403 sorununu bitirmek için)
 
 # ===== DEFAULT DEVICE STATE =====
 DEFAULTS = dict(
@@ -30,7 +30,11 @@ def tg_send(msg: str):
         print("Telegram env missing")
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=8)
+    try:
+        r = requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=8)
+        print("sendMessage:", r.status_code, r.text[:200])
+    except Exception as e:
+        print("Telegram send error:", e)
 
 def ensure_dev(dev):
     if dev not in DEVICES:
@@ -76,7 +80,7 @@ def ping():
 
 @app.post("/event")
 def event():
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
     dev = data.get("dev", "baby1")
     rms = data.get("rms", None)
 
@@ -88,12 +92,12 @@ def event():
 
 @app.post("/telegram")
 def telegram():
-    if SECRET:
-        if request.args.get("secret") != SECRET:
-            return "forbidden", 403
+    # SECRET kontrolü kaldırıldı -> 403 artık yok
 
-    data = request.get_json(force=True)
-    msg = data.get("message", {}).get("text", "").strip()
+    data = request.get_json(silent=True) or {}
+    msg = (data.get("message", {}) or {}).get("text", "")
+    msg = (msg or "").strip()
+
     dev = "baby1"
     ensure_dev(dev)
     s = DEVICES[dev]
