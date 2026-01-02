@@ -111,21 +111,12 @@ def watchdog():
             was_offline = bool(s.get("offline", False))
 
             if not ok:
-                # ✅ online -> offline geçişinde mesajı ANINDA bir kere gönder
+                # 🔴 ONLINE → OFFLINE (SADECE 1 KERE)
                 if not was_offline:
-                    tg_broadcast(f"⚠️ {dev}: bağlantı koptu (>{timeout}s ping yok)")
-                    s["last_offline_alert"] = now
-                else:
-                    # offline uzun sürerse timeout aralığıyla tekrar hatırlat (opsiyonel)
-                    last_alert = s.get("last_offline_alert", 0.0) or 0.0
-                    if (now - last_alert) >= timeout:
-                        tg_broadcast(f"⚠️ {dev}: hâlâ offline (>{timeout}s ping yok)")
-                        s["last_offline_alert"] = now
-
-                s["offline"] = True
-
+                    tg_broadcast(f"⚠️ {dev}: bağlantı koptu")
+                    s["offline"] = True
             else:
-                # ✅ offline -> online dönüşünde tek sefer mesaj
+                # 🟢 OFFLINE → ONLINE (SADECE 1 KERE)
                 if was_offline:
                     tg_broadcast(f"✅ {dev}: bağlantı geri geldi")
                 s["offline"] = False
