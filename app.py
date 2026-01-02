@@ -1,4 +1,3 @@
-# app.py
 import os
 import time
 import threading
@@ -32,23 +31,27 @@ DEFAULTS = dict(
     calib_result=None,
     calib_result_ts=0,
 
-    # watchdog state (offline/online takibi)
+    # watchdog state
     wd_last_check=0.0,        # cihaz bazlı son kontrol zamanı
     offline=False,            # son bilinen bağlantı durumu
-    last_offline_alert=0.0,   # offline uyarı spam engeli
+    last_offline_alert=0.0,   # offline tekrar hatırlatma için
 )
 
 DEVICES = {}
 
 # ===== Armed'a göre kurallar =====
-ARMED_CHECK_S     = 30
-DISARMED_CHECK_S  = 300
+ARMED_CHECK_S      = 30
+DISARMED_CHECK_S   = 300
 
 ARMED_TIMEOUT_S    = 70
 DISARMED_TIMEOUT_S = 660
 
-# watchdog loop'un kendi uyanma periyodu (hafif, cihaz bazlı kontrol periyodu ayrı)
+# watchdog döngüsünün kendi tick'i (hafif)
 WATCHDOG_TICK_S = 5
+
+# watchdog’un worker içinde 1 kere başlaması için
+_watchdog_started = False
+_watchdog_lock = threading.Lock()
 
 
 # ---------- helpers ----------
@@ -68,6 +71,7 @@ def tg_send(chat_id: int, msg: str):
         print("Telegram send error:", e)
 
 def tg_broadcast(msg: str):
+    # SUBSCRIBERS boşsa kimseye gitmez (CHAT_ID istemediğin için normal)
     for cid in list(SUBSCRIBERS):
         tg_send(int(cid), msg)
 
@@ -89,11 +93,11 @@ def is_device_ok(state: dict, now: float) -> bool:
 
 # ---------- watchdog ----------
 def watchdog():
+    print("[WD] watchdog thread started")
     while True:
         now = time.time()
 
-        for dev, s in DEVICES.items():
-            # cihaz bazlı kontrol sıklığı
+        for dev, s in list(DEVICES.items()):
             check_period = check_period_for(s)
             timeout = timeout_for(s)
 
@@ -106,21 +110,44 @@ def watchdog():
             was_offline = bool(s.get("offline", False))
 
             if not ok:
-                # Offline uyarısı: spam engeli (min aralık = timeout)
-                last_alert = s.get("last_offline_alert", 0.0) or 0.0
-                if (now - last_alert) >= timeout:
+                # ✅ online -> offline geçişinde mesajı ANINDA bir kere gönder
+                if not was_offline:
                     tg_broadcast(f"⚠️ {dev}: bağlantı koptu (>{timeout}s ping yok)")
                     s["last_offline_alert"] = now
+                else:
+                    # offline uzun sürerse timeout aralığıyla tekrar hatırlat (opsiyonel)
+                    last_alert = s.get("last_offline_alert", 0.0) or 0.0
+                    if (now - last_alert) >= timeout:
+                        tg_broadcast(f"⚠️ {dev}: hâlâ offline (>{timeout}s ping yok)")
+                        s["last_offline_alert"] = now
+
                 s["offline"] = True
+
             else:
-                # Offline -> Online dönüşü: tek sefer mesaj
+                # ✅ offline -> online dönüşünde tek sefer mesaj
                 if was_offline:
                     tg_broadcast(f"✅ {dev}: bağlantı geri geldi")
                 s["offline"] = False
 
         time.sleep(WATCHDOG_TICK_S)
 
-threading.Thread(target=watchdog, daemon=True).start()
+
+def start_watchdog_once():
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    with _watchdog_lock:
+        if _watchdog_started:
+            return
+        # worker içinde başlat (garanti)
+        threading.Thread(target=watchdog, daemon=True).start()
+        _watchdog_started = True
+
+
+# ✅ watchdog’u worker içinde garanti başlat: ilk request’te
+@app.before_request
+def _ensure_watchdog():
+    start_watchdog_once()
 
 
 # ---------- routes ----------
@@ -221,7 +248,6 @@ def telegram():
     if chat_id not in SUBSCRIBERS:
         return jsonify(ok=True), 200
 
-    # tek cihaz state'i
     dev = "EGE"
     ensure_dev(dev)
     s = DEVICES[dev]
@@ -241,7 +267,6 @@ def telegram():
         )
         return jsonify(ok=True), 200
 
-    # ---- on/off ----
     if text == "/on":
         s["armed"] = True
         reply("🟢 Sistem AKTİF")
@@ -252,14 +277,12 @@ def telegram():
         reply("🔴 Sistem KAPALI")
         return jsonify(ok=True), 200
 
-    # ---- status ----
     if text == "/status":
         now = time.time()
         last_ping_ago = int(now - s["last_ping"]) if s["last_ping"] else -1
         calib_age = int(now - s["calib_result_ts"]) if s["calib_result_ts"] else -1
 
-        dev_ok = is_device_ok(s, now)
-        ok_line = f"{dev}_device_OK" if dev_ok else f"{dev}_device_NOK"
+        ok_line = f"{dev}_device_OK" if is_device_ok(s, now) else f"{dev}_device_NOK"
 
         reply(
             f"dev={dev}\n"
@@ -274,9 +297,7 @@ def telegram():
         )
         return jsonify(ok=True), 200
 
-    # ---- calib ----
     if text == "/calib" or text.lower() == "calib":
-        # taze sonuç varsa direkt dön
         if s["calib_result_ts"] and (time.time() - s["calib_result_ts"] <= 60) and (s["calib_result"] is not None):
             reply(f"✅ Oda RMS (15s ort): {s['calib_result']}  (taze)")
             return jsonify(ok=True), 200
@@ -287,7 +308,6 @@ def telegram():
         reply("📏 15sn oda ölçümü başlatıldı. ~15-20sn sonra tekrar /calib yaz.")
         return jsonify(ok=True), 200
 
-    # ---- set ----
     if text.startswith("/set"):
         try:
             _, key, val = text.split()
