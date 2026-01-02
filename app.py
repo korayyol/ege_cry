@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # ===== ENV =====
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-
+SECRET    = os.environ.get("SECRET", "")  # opsiyonel webhook güvenliği
 
 # ===== Subscribers (bildirim alacak chat'ler) =====
 SUBSCRIBERS = set()  # chat_id (int)
