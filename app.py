@@ -105,6 +105,11 @@ def watchdog():
                     s["last_offline_alert"] = now
                 s["offline"] = True
             else:
+                # offline -> online geri geldiyse tek sefer mesaj at
+                if was_offline:
+                    tg_broadcast(f"✅ {dev}: bağlantı geri geldi")
+                    # İstersen offline uyarısı zamanını sıfırla (şart değil)
+                    # s["last_offline_alert"] = 0.0
                 s["offline"] = False
 
         time.sleep(WATCHDOG_TICK_S)
