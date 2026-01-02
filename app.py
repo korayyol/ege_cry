@@ -27,12 +27,24 @@ DEFAULTS = dict(
 
     calib_req_ts=0,
     calib_result=None,
-    calib_result_ts=0
+    calib_result_ts=0,
+
+    # --- watchdog helpers ---
+    wd_last_check=0.0,     # son kontrol zamanı
+    offline=False,         # son bilinen bağlantı durumu
+    last_offline_alert=0.0 # spam önleme
 )
 DEVICES = {}
 
-PING_TIMEOUT_S = 260
-CHECK_PERIOD_S = 10
+# armed'a göre kurallar
+ARMED_CHECK_S   = 30
+DISARMED_CHECK_S = 300
+
+ARMED_TIMEOUT_S   = 70
+DISARMED_TIMEOUT_S = 660
+
+# watchdog loop'un kendi uyanma periyodu (hafif)
+WATCHDOG_TICK_S = 5
 
 # ---------- helpers ----------
 def ensure_dev(dev: str):
@@ -57,17 +69,45 @@ def tg_broadcast(msg: str):
 def clamp(v: int, vmin: int, vmax: int) -> int:
     return max(vmin, min(vmax, v))
 
+def is_device_ok(state: dict, now: float) -> bool:
+    """armed durumuna göre 'online' sayılma kuralı"""
+    last_ping = state.get("last_ping", 0.0) or 0.0
+    if not last_ping:
+        return False
+    timeout = ARMED_TIMEOUT_S if state.get("armed", True) else DISARMED_TIMEOUT_S
+    return (now - last_ping) <= timeout
+
 # ---------- watchdog ----------
 def watchdog():
     while True:
         now = time.time()
+
         for dev, s in DEVICES.items():
-            if s["last_ping"] and (now - s["last_ping"] > PING_TIMEOUT_S):
-                # aynı uyarıyı spamlamamak için last_alarm kullan
-                if (now - s["last_alarm"]) > PING_TIMEOUT_S:
-                    tg_broadcast(f"⚠️ {dev}: {PING_TIMEOUT_S}s ping yok (ESP offline olabilir)")
-                    s["last_alarm"] = now
-        time.sleep(CHECK_PERIOD_S)
+            armed = bool(s.get("armed", True))
+            check_period = ARMED_CHECK_S if armed else DISARMED_CHECK_S
+            timeout = ARMED_TIMEOUT_S if armed else DISARMED_TIMEOUT_S
+
+            # cihaz bazlı "kontrol sıklığı" (30s / 300s)
+            last_chk = s.get("wd_last_check", 0.0) or 0.0
+            if last_chk and (now - last_chk) < check_period:
+                continue
+            s["wd_last_check"] = now
+
+            # bağlantı OK mu?
+            ok = is_device_ok(s, now)
+
+            # NOK olduysa Telegram uyarısı (spam engelli)
+            if not ok:
+                # aynı uyarıyı spamlamamak için: min alert aralığı = timeout
+                last_alert = s.get("last_offline_alert", 0.0) or 0.0
+                if (now - last_alert) >= timeout:
+                    tg_broadcast(f"⚠️ {dev}: bağlantı koptu (>{timeout}s ping yok)")
+                    s["last_offline_alert"] = now
+                s["offline"] = True
+            else:
+                s["offline"] = False
+
+        time.sleep(WATCHDOG_TICK_S)
 
 threading.Thread(target=watchdog, daemon=True).start()
 
@@ -127,7 +167,7 @@ def calib():
 
 @app.post("/telegram")
 def telegram():
-    # opsiyonel webhook güvenliği (Render -> Telegram webhook araya girerse)
+    # opsiyonel webhook güvenliği
     if SECRET:
         got = request.args.get("secret", "")
         if got != SECRET:
@@ -164,8 +204,7 @@ def telegram():
         reply("👋 Bot kapatıldı. Bildirim almayacaksın.\nTekrar için /start yaz.")
         return jsonify(ok=True), 200
 
-    # /leave sonrası “alarm + cevap yok” için:
-    # abone değilse /start dışında her şeyi sessizce yok say.
+    # abone değilse /start dışında her şeyi sessizce yok say
     if chat_id not in SUBSCRIBERS:
         return jsonify(ok=True), 200
 
@@ -185,7 +224,7 @@ def telegram():
         )
         return jsonify(ok=True), 200
 
-    # tek cihaz state'i (istersen /set dev ile genişletiriz; şimdilik sabit)
+    # tek cihaz state'i
     dev = "EGE"
     ensure_dev(dev)
     s = DEVICES[dev]
@@ -206,6 +245,11 @@ def telegram():
         now = time.time()
         last_ping_ago = int(now - s["last_ping"]) if s["last_ping"] else -1
         calib_age = int(now - s["calib_result_ts"]) if s["calib_result_ts"] else -1
+
+        # bağlantı durumu satırı
+        dev_ok = is_device_ok(s, now)
+        ok_line = f"{dev}_device_OK" if dev_ok else f"{dev}_device_NOK"
+
         reply(
             f"dev={dev}\n"
             f"armed={s['armed']}\n"
@@ -214,13 +258,13 @@ def telegram():
             f"cooldown_s={s['cooldown_s']}\n"
             f"window_ms={s['window_ms']}\n"
             f"last_ping={last_ping_ago}s önce\n"
-            f"last_calib_rms={s['calib_result']} ({calib_age}s önce)"
+            f"last_calib_rms={s['calib_result']} ({calib_age}s önce)\n"
+            f"{ok_line}"
         )
         return jsonify(ok=True), 200
 
     # ---- calib ----
     if text == "/calib" or text.lower() == "calib":
-        # son sonuç tazeyse direkt göster
         if s["calib_result_ts"] and (time.time() - s["calib_result_ts"] <= 60) and (s["calib_result"] is not None):
             reply(f"✅ Oda RMS (15s ort): {s['calib_result']}  (taze)")
             return jsonify(ok=True), 200
@@ -255,7 +299,6 @@ def telegram():
         reply(f"✅ {key} güncellendi")
         return jsonify(ok=True), 200
 
-    # bilinmeyen komut
     reply("❓ /help yaz")
     return jsonify(ok=True), 200
 
