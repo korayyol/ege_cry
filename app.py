@@ -19,9 +19,9 @@ DEFAULTS = dict(
     # cfg params
     armed=True,
     thr=35,
-    hold_ms=900,
-    cooldown_s=30,
-    window_ms=360,
+    hold_ms=500,
+    cooldown_s=7,
+    window_ms=270,
 
     # runtime
     last_ping=0.0,
