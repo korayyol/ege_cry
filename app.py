@@ -19,7 +19,7 @@ DEFAULTS = dict(
     # cfg params
     armed=True,
     thr=35,
-    hold_ms=500,
+    hold_ms=600,
     cooldown_s=7,
     window_ms=270,
 
